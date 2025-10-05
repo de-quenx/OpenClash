@@ -1,0 +1,167 @@
+name: Release Packages Test
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+env:
+  PACKAGE_NAME: luci-app-openclash
+  PACKAGE_DIR: luci-app-openclash
+
+jobs:
+  get-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: ${{ github.ref_name }}
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep 'PKG_VERSION:=' ./${{ env.PACKAGE_DIR }}/Makefile | awk -F '=' '{print $2}' | tr -d ' ')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "New Version: ${VERSION}"
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.version.outputs.version }}"
+          generate_release_notes: true
+          draft: false
+          name: "v${{ steps.version.outputs.version }} Release"
+          body: |
+            ---
+            
+            ### Packages Tersedia
+            - **ALL**: Semua arsitektur
+            - **24.10**: Versi stabil  
+            - **SNAPSHOT**: Versi terbaru
+
+            ---
+            
+            ### Instalasi For Openwrt | ImmortalWrt
+            # IPK
+            ```bash
+            opkg install ${{ env.PACKAGE_NAME }}*.ipk
+            ```
+            
+            # APK
+            ```bash
+            apk add ${{ env.PACKAGE_NAME }}*.apk
+            ```
+            
+            ### Terima Kasih All
+            Terima kasih untuk semua pengguna yang telah coba ini!
+
+            ----
+            
+  release:
+    name: Release ${{ matrix.arch }}-${{ matrix.branch }}
+    needs: get-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    continue-on-error: false
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+        branch:
+          - openwrt-24.10
+          - SNAPSHOT
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up build environment
+        run: |
+          echo "::group::Setting up build environment for ${{ matrix.arch }}-${{ matrix.branch }}"
+          mkdir -p feeds/${{ env.PACKAGE_NAME }} artifacts
+          rsync -av --exclude='.git/' --exclude='feeds/' --exclude='artifacts/' ./${{ env.PACKAGE_DIR }}/ ./feeds/${{ env.PACKAGE_NAME }}/
+          echo "::endgroup::"
+
+      - name: Build package
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}-${{ matrix.branch }}
+          ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
+          FEED_DIR: ${{ github.workspace }}/feeds
+          PACKAGES: ${{ env.PACKAGE_NAME }}
+          NO_REFRESH_CHECK: true
+
+      - name: List built packages
+        run: |
+          find ${{ github.workspace }}/artifacts -type f -name "${{ env.PACKAGE_NAME }}*.ipk" -o -name "${{ env.PACKAGE_NAME }}*.apk" | sort
+          echo "::endgroup::"
+
+      - name: Prepare release artifacts
+        run: |
+          mkdir -p ${{ github.workspace }}/release-artifacts
+
+          if [[ "${{ matrix.branch }}" == "SNAPSHOT" ]]; then
+            find ${{ github.workspace }}/artifacts/bin/packages -name "${{ env.PACKAGE_NAME }}*.apk" -exec cp {} ${{ github.workspace }}/release-artifacts/ \; || true
+            find ${{ github.workspace }}/artifacts/bin/targets -name "${{ env.PACKAGE_NAME }}*.apk" -exec cp {} ${{ github.workspace }}/release-artifacts/ \; || true
+          else
+            find ${{ github.workspace }}/artifacts/bin/packages -name "${{ env.PACKAGE_NAME }}*.ipk" -exec cp {} ${{ github.workspace }}/release-artifacts/ \; || true
+            find ${{ github.workspace }}/artifacts/bin/targets -name "${{ env.PACKAGE_NAME }}*.ipk" -exec cp {} ${{ github.workspace }}/release-artifacts/ \; || true
+          fi
+
+          echo "Contents of release-artifacts directory:"
+          ls -la ${{ github.workspace }}/release-artifacts/
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ needs.get-version.outputs.version }}"
+          files: |
+            ${{ github.workspace }}/release-artifacts/*
+
+      - name: Clean cache after successful build
+        if: success()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log('Starting cache cleanup...');
+            
+            const caches = await github.rest.actions.getActionsCacheList({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            
+            if (caches.data.total_count === 0) {
+              console.log('No caches found');
+              return;
+            }
+            
+            console.log('Found ' + caches.data.total_count + ' cache(s) to delete');
+            
+            for (const cache of caches.data.actions_caches) {
+              console.log('Deleting: ' + cache.key + ' (' + (cache.size_in_bytes / 1024 / 1024).toFixed(2) + ' MB)');
+              try {
+                await github.rest.actions.deleteActionsCacheById({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  cache_id: cache.id,
+                });
+                console.log('Successfully deleted: ' + cache.key);
+              } catch (error) {
+                console.log('Failed to delete ' + cache.key + ': ' + error.message);
+              }
+            }
+            
+            console.log('Cache cleanup completed!');
